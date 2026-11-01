@@ -1,4 +1,4 @@
-"""Ollama UI 桌面应用入口。"""
+"""Andesite 桌面应用入口。"""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import logging
 
 import flet as ft
 
-from ollama_ui.app import OllamaUI
+from andesite.app import AndesiteApp
 
 
 def main(page: ft.Page) -> None:
@@ -17,8 +17,8 @@ def main(page: ft.Page) -> None:
     )
     for noisy in ("httpx", "flet_web", "flet"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    OllamaUI(page)
+    AndesiteApp(page)
 
 
 if __name__ == "__main__":
-    ft.run(main, name="Ollama UI", assets_dir=None)
+    ft.run(main, name="Andesite", assets_dir=None)

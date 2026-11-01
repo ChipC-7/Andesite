@@ -1,4 +1,4 @@
-"""Flet 主界面：会话侧栏、流式聊天和图片输入。"""
+"""Andesite 主界面：会话侧栏、流式聊天和图片输入。"""
 
 from __future__ import annotations
 
@@ -29,10 +29,12 @@ from .models import (
     Conversation,
     Message,
     PendingImage,
+    SearchSource,
     Settings,
 )
 from .storage import Store
 from .theme import C, build_theme, markdown_style
+from .websearch import WebSearchError, build_search_context, search_web
 
 logger = logging.getLogger(__name__)
 
@@ -68,11 +70,12 @@ class MessageView:
     error_text: ft.Text | None = None
     actions: ft.Row | None = None
     content_host: ft.Container | None = None
+    sources_box: ft.Container | None = None
     regenerate_button: ft.TextButton | None = None
     edit_button: ft.TextButton | None = None
 
 
-class OllamaUI:
+class AndesiteApp:
     def __init__(self, page: ft.Page) -> None:
         self.page = page
         self.store = Store()
@@ -115,7 +118,7 @@ class OllamaUI:
     def _configure_page(self) -> None:
         # 窗口采用无侧边留白的深色布局，并设置最小尺寸。
         page = self.page
-        page.title = "Ollama UI"
+        page.title = "Andesite"
         page.padding = 0
         page.spacing = 0
         page.bgcolor = C.BG
@@ -214,7 +217,7 @@ class OllamaUI:
                 brand_mark,
                 ft.Column(
                     controls=[
-                        ft.Text("Ollama UI", size=17, weight=ft.FontWeight.W_700, color=C.TEXT),
+                        ft.Text("Andesite", size=17, weight=ft.FontWeight.W_700, color=C.TEXT),
                         ft.Text("本地多模态工作台", size=11, color=C.MUTED),
                     ],
                     spacing=1,
@@ -364,7 +367,7 @@ class OllamaUI:
             ft.Icons.LOCK_OUTLINE, size=11, color=C.MUTED_DIM
         )
         self.header_subtitle_text = ft.Text(
-            "本地推理 · 数据不出设备",
+            "本地推理",
             size=11,
             color=C.MUTED_DIM,
             max_lines=1,
@@ -584,7 +587,7 @@ class OllamaUI:
 
         self.empty_note = ft.Text(
             "在终端里没法发图片？这里可以选择或粘贴截图，"
-            "再交给 Ollama 的视觉模型。所有内容只留在本机。",
+            "再交给 Ollama 的视觉模型。",
             size=13,
             color=C.MUTED,
             text_align=ft.TextAlign.CENTER,
@@ -739,6 +742,17 @@ class OllamaUI:
             on_click=self._send_clicked,
         )
 
+        # 联网搜索快捷开关：开启后每次提问前先用 Bing 搜网页。
+        self.web_search_button = ft.Container(
+            width=30,
+            height=30,
+            border_radius=9,
+            alignment=ft.Alignment(0, 0),
+            on_click=self._toggle_web_search,
+            content=ft.Icon(ft.Icons.PUBLIC, size=17, color=C.MUTED),
+        )
+        self._update_web_search_button()
+
         # 上下文占用提示，请求完成后更新。
         self.composer_hint = ft.Text(
             f"上下文 — / {self.settings.context_size:,}",
@@ -764,6 +778,7 @@ class OllamaUI:
                     ft.Row(
                         controls=[
                             self.attach_drop_target,
+                            self.web_search_button,
                             self.composer_hint,
                             ft.Container(expand=True),
                             self.keyboard_hint,
@@ -1189,6 +1204,43 @@ class OllamaUI:
         self.settings.deep_thinking = not self.settings.deep_thinking
         self._save_settings()
         self._update_think_control()
+
+    def _update_web_search_button(self) -> None:
+        # 开启时用强调色高亮，关闭时保持低干扰。
+        enabled = self.settings.web_search
+        self.web_search_button.bgcolor = (
+            C.ACCENT_SOFT if enabled else ft.Colors.TRANSPARENT
+        )
+        self.web_search_button.border = ft.Border.all(
+            1, C.ACCENT_BORDER if enabled else C.BORDER_SOFT
+        )
+        self.web_search_button.tooltip = (
+            "联网搜索已开启（使用 Bing，点击关闭）"
+            if enabled
+            else "联网搜索已关闭（点击开启）"
+        )
+        self.web_search_button.content = ft.Icon(
+            ft.Icons.PUBLIC,
+            size=17,
+            color=C.ACCENT if enabled else C.MUTED,
+        )
+        try:
+            self.web_search_button.update()
+        except Exception:
+            pass
+
+    def _toggle_web_search(self, e: Any = None) -> None:
+        self.settings.web_search = not self.settings.web_search
+        self._save_settings()
+        self._update_web_search_button()
+        # 顶部的数据去向提示需要随开关即时更新。
+        self._update_header_subtitle()
+        if self.settings.web_search:
+            self._snack(
+                "联网搜索已开启：问题会发送给 Bing 做网页搜索。", tone="success"
+            )
+        else:
+            self._snack("联网搜索已关闭。", tone="info")
 
     def _on_model_select(self, e: Any = None) -> None:
         if self.generating:
@@ -1735,36 +1787,60 @@ class OllamaUI:
         return text
 
     def _update_header_subtitle(self) -> None:
-        # 副标题显示计算模式和实际显存；仅远程连接时附加隐私警告。
+        # 副标题显示隐私提示、计算模式和实际显存；远程 Ollama 与联网搜索都要提示数据去向。
         host = (urlparse(self.settings.base_url).hostname or "").lower()
         is_local = host in {"localhost", "127.0.0.1", "0.0.0.0", "::1"}
+        searching = self.settings.web_search
+        privacy_parts: list[str] = []
+        tooltip_parts: list[str] = []
         if is_local:
-            # 本地模式不再显示隐私文案，副标题只保留计算模式。
-            privacy = ""
-            self.header_subtitle_icon.visible = False
-            self.header_subtitle_text.color = C.MUTED_DIM
+            # 本地模式下只有开启联网搜索时才需要在顶部提示。
+            self.header_subtitle_icon.visible = searching
+            if searching:
+                self.header_subtitle_icon.name = ft.Icons.PUBLIC
+                self.header_subtitle_icon.color = C.WARNING
+                self.header_subtitle_text.color = C.WARNING
+                privacy_parts.append("联网搜索 · 搜索词会发送到 Bing")
+                tooltip_parts.append("联网搜索已开启：当前问题会发送给 Bing 做网页搜索。")
+            else:
+                self.header_subtitle_text.color = C.MUTED_DIM
             if hasattr(self, "empty_note"):
                 self.empty_note.value = (
                     "在终端里没法发图片？这里可以选择或粘贴截图，"
-                    "再交给 Ollama 的视觉模型。所有内容只留在本机。"
+                    "再交给 Ollama 的视觉模型。"
+                    + (
+                        "聊天内容只发送到本机 Ollama；联网搜索的词会发送给 Bing。"
+                        if searching
+                        else "所有内容只留在本机。"
+                    )
                 )
         else:
-            # 连接远程地址时仍提示数据会发送到该服务器。
-            privacy = "远程 Ollama · 数据会发送到该服务器"
+            # 连接远程地址时提示消息会发送到该服务器；联网搜索再额外提示 Bing。
             self.header_subtitle_icon.visible = True
             self.header_subtitle_icon.name = ft.Icons.CLOUD_OUTLINED
             self.header_subtitle_icon.color = C.WARNING
             self.header_subtitle_text.color = C.WARNING
+            privacy_parts.append("远程 Ollama · 数据会发送到该服务器")
+            tooltip_parts.append("消息和图片会发送到远程 Ollama 服务器。")
+            if searching:
+                privacy_parts.append("搜索词也会发送到 Bing")
+                tooltip_parts.append("联网搜索会把当前问题发送给 Bing。")
             if hasattr(self, "empty_note"):
                 self.empty_note.value = (
-                    "当前连接的是远程 Ollama 地址，图片和文本会发送到该服务器，"
-                    "而不是只留在本机。"
+                    "当前连接的是远程 Ollama 地址，图片和文本会发送到该服务器"
+                    + (
+                        "；联网搜索还会把搜索词发送给 Bing，而不是只留在本机。"
+                        if searching
+                        else "，而不是只留在本机。"
+                    )
                 )
+        privacy = " · ".join(privacy_parts)
         parts = [privacy, self._compute_summary(), self._runtime_summary()]
         self.header_subtitle_text.value = " · ".join(
             part for part in parts if part
         )
-        tooltip = self._compute_tooltip()
+        tooltip_parts.append(self._compute_tooltip())
+        tooltip = "\n".join(tooltip_parts)
         self.header_subtitle_text.tooltip = tooltip
         self.header_subtitle.tooltip = tooltip
         try:
@@ -2047,6 +2123,7 @@ class OllamaUI:
                 vertical_alignment=ft.CrossAxisAlignment.START,
             ),
         )
+        sources_box = self._build_sources_box(message.sources)
 
         is_last_assistant = bool(
             self.current
@@ -2104,7 +2181,14 @@ class OllamaUI:
         )
 
         column = ft.Column(
-            controls=[header, thinking_box, content_host, error_box, actions],
+            controls=[
+                header,
+                thinking_box,
+                content_host,
+                error_box,
+                sources_box,
+                actions,
+            ],
             spacing=8,
             tight=True,
         )
@@ -2120,6 +2204,7 @@ class OllamaUI:
             row=row,
             markdown=markdown,
             content_host=content_host,
+            sources_box=sources_box,
             status=status,
             spinner=spinner,
             thinking_box=thinking_box,
@@ -2129,6 +2214,65 @@ class OllamaUI:
             actions=actions,
             regenerate_button=regenerate_button,
         )
+
+    def _sources_content(self, sources: list[SearchSource]) -> ft.Control:
+        # 用 Markdown 列出可点击来源；替换会破坏语法的字符。
+        lines = []
+        for index, source in enumerate(sources, 1):
+            title = source.title.replace("[", "［").replace("]", "］")
+            url = source.url.replace("(", "%28").replace(")", "%29")
+            lines.append(f"{index}. [{title}]({url})")
+        return ft.Column(
+            controls=[
+                ft.Row(
+                    controls=[
+                        ft.Icon(ft.Icons.PUBLIC, size=13, color=C.ACCENT),
+                        ft.Text(
+                            f"联网搜索来源 · {len(sources)}",
+                            size=10,
+                            color=C.MUTED,
+                            weight=ft.FontWeight.W_600,
+                        ),
+                    ],
+                    spacing=6,
+                    tight=True,
+                ),
+                ft.Markdown(
+                    value="\n".join(lines),
+                    selectable=True,
+                    extension_set=ft.MarkdownExtensionSet.GITHUB_FLAVORED,
+                    md_style_sheet=self._ensure_md_style(),
+                    auto_follow_links=True,
+                    shrink_wrap=False,
+                ),
+            ],
+            spacing=5,
+            tight=True,
+        )
+
+    def _build_sources_box(self, sources: list[SearchSource]) -> ft.Container:
+        # 没有来源时整块隐藏，不占用回答下方空间。
+        return ft.Container(
+            visible=bool(sources),
+            bgcolor=C.SURFACE_ALT,
+            border=ft.Border.all(1, C.BORDER_SOFT),
+            border_radius=10,
+            padding=ft.Padding.symmetric(horizontal=12, vertical=9),
+            content=self._sources_content(sources),
+        )
+
+    def _sync_sources_view(
+        self, view: MessageView | None, message: Message
+    ) -> None:
+        # 搜索完成后原地刷新来源框，避免重建整条消息。
+        if not view or not view.sources_box:
+            return
+        view.sources_box.content = self._sources_content(message.sources)
+        view.sources_box.visible = bool(message.sources)
+        try:
+            view.sources_box.update()
+        except Exception:
+            logger.debug("Could not update sources box", exc_info=True)
 
     def _rich_content(self, content: str) -> ft.Control | None:
         """把完成的回答渲染成文本段 + 可单独复制的代码卡片。"""
@@ -3005,11 +3149,6 @@ class OllamaUI:
         history = [
             message for message in conversation.messages if message.id != assistant.id
         ]
-        payload = build_api_messages(
-            history,
-            system_prompt=self.settings.system_prompt,
-            image_loader=self.store.read_image,
-        )
         model_info = self._model_info(model)
         supports_thinking = bool(model_info and model_info.supports_thinking)
         think_enabled = supports_thinking and self.settings.deep_thinking
@@ -3020,9 +3159,23 @@ class OllamaUI:
         has_images = any(
             message.role == "user" and message.attachments for message in history
         )
+        last_user_query = next(
+            (
+                message.content.strip()
+                for message in reversed(history)
+                if message.role == "user" and message.content.strip()
+            ),
+            "",
+        )
+
+        # 联网搜索放在流式生成之前；结果只作为本次请求的临时上下文。
+        search_context = ""
+        wants_search = bool(self.settings.web_search and last_user_query)
         if view and view.status:
             view.status.value = (
-                "正在处理图片并生成…" if has_images else "正在等待模型响应…"
+                "正在联网搜索…"
+                if wants_search
+                else ("正在处理图片并生成…" if has_images else "正在等待模型响应…")
             )
             view.status.color = C.ACCENT
             try:
@@ -3035,6 +3188,49 @@ class OllamaUI:
                 view.spinner.update()
             except Exception:
                 pass
+
+        if wants_search:
+            search_failed = False
+            try:
+                results = await search_web(last_user_query)
+            except WebSearchError as exc:
+                search_failed = True
+                results = []
+                self._snack(str(exc), tone="warning")
+            except Exception as exc:  # noqa: BLE001 - 搜索失败不应阻断回答
+                logger.exception("Unexpected web search error")
+                search_failed = True
+                results = []
+                self._snack(f"联网搜索失败：{exc}", tone="warning")
+            if not results and not search_failed:
+                self._snack("联网搜索没有找到结果，已改用本地模型回答。", tone="info")
+            assistant.sources = results
+            self._sync_sources_view(view, assistant)
+            search_context = build_search_context(last_user_query, results)
+            if view and view.status:
+                view.status.value = (
+                    "正在处理图片和搜索结果并生成…"
+                    if has_images
+                    else "正在等待模型响应…"
+                )
+                try:
+                    view.status.update()
+                except Exception:
+                    pass
+
+        payload = build_api_messages(
+            history,
+            system_prompt=self.settings.system_prompt,
+            image_loader=self.store.read_image,
+        )
+        if search_context:
+            # 保留用户自己的系统提示词，把搜索资料放在其后。
+            system_index = (
+                1 if payload and payload[0].get("role") == "system" else 0
+            )
+            payload.insert(
+                system_index, {"role": "system", "content": search_context}
+            )
 
         try:
             if view and view.markdown:
@@ -3484,6 +3680,37 @@ class OllamaUI:
             ),
         )
 
+        web_search_switch = ft.Switch(
+            value=self.settings.web_search,
+            active_color=C.ACCENT,
+            active_track_color=C.ACCENT_SOFT,
+            inactive_thumb_color=C.MUTED,
+            inactive_track_color=C.SURFACE_ALT,
+        )
+        web_search_row = ft.Container(
+            padding=ft.Padding.symmetric(horizontal=2, vertical=2),
+            content=ft.Row(
+                controls=[
+                    ft.Column(
+                        controls=[
+                            ft.Text("联网搜索", size=12, color=C.TEXT),
+                            ft.Text(
+                                "回答前使用 Bing 搜索网页，并把结果作为临时上下文；"
+                                "搜索词会发送给 Bing。来源会显示在回答下方。",
+                                size=10,
+                                color=C.MUTED_DIM,
+                            ),
+                        ],
+                        spacing=2,
+                        expand=True,
+                    ),
+                    web_search_switch,
+                ],
+                spacing=10,
+                vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            ),
+        )
+
         def on_temperature_change(event: Any) -> None:
             temperature_value.value = f"{float(event.control.value or 0):.2f}"
             temperature_value.update()
@@ -3533,6 +3760,7 @@ class OllamaUI:
                 compute_mode=str(compute_dropdown.value or "auto"),
                 hybrid_gpu_layers=hybrid_layers,
                 compress_images=bool(compress_switch.value),
+                web_search=bool(web_search_switch.value),
             )
             self.client = OllamaClient(base_url)
             self.runtime_models = []
@@ -3540,6 +3768,7 @@ class OllamaUI:
             self._update_context_hint()
             self._update_model_meta()
             self._update_header_subtitle()
+            self._update_web_search_button()
             self.page.pop_dialog()
             self._snack("设置已保存。", tone="success")
             self.page.run_task(self.refresh_models, notify=False)
@@ -3646,6 +3875,7 @@ class OllamaUI:
                                     size=10,
                                     color=C.MUTED_DIM,
                                 ),
+                                web_search_row,
                             ],
                         ),
                         section(

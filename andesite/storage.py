@@ -29,11 +29,24 @@ _ALLOWED_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
 
 class Store:
-    """读写 ``~/.ollama-ui``（或 OLLAMA_UI_HOME 指定目录）下的应用数据。"""
+    """读写 Andesite 数据；旧版 ``~/.ollama-ui`` 会被自动兼容。"""
 
     def __init__(self, data_dir: str | Path | None = None) -> None:
-        env_dir = os.environ.get("OLLAMA_UI_HOME")
-        root = data_dir or env_dir or Path.home() / ".ollama-ui"
+        # 新环境变量优先；旧的 OLLAMA_UI_HOME 继续兼容。
+        env_dir = os.environ.get("ANDESITE_HOME") or os.environ.get(
+            "OLLAMA_UI_HOME"
+        )
+        if data_dir or env_dir:
+            root = data_dir or env_dir
+        else:
+            new_home = Path.home() / ".andesite"
+            legacy_home = Path.home() / ".ollama-ui"
+            # 从旧版升级时继续使用原目录，避免历史会话“消失”。
+            root = (
+                legacy_home
+                if legacy_home.exists() and not new_home.exists()
+                else new_home
+            )
         self.data_dir = Path(root).expanduser()
         self.media_dir = self.data_dir / "media"
         self.conversations_path = self.data_dir / "conversations.json"

@@ -1,6 +1,6 @@
-# Ollama UI
+# Andesite
 
-一个用 [Flet](https://flet.dev/) 写的 Ollama 桌面客户端，重点解决终端里**没法发图片**的问题：可以直接选择图片，或按 `Ctrl+V` 粘贴截图，然后交给本地的视觉模型对话。
+Andesite 是一个用 [Flet](https://flet.dev/) 写的 Ollama 桌面客户端，重点解决终端里**没法发图片**的问题：可以直接选择图片，或按 `Ctrl+V` 粘贴截图，然后交给本地的视觉模型对话。
 
 界面是深色本地工作台风格，支持流式 Markdown/代码/表格渲染、思考过程折叠、对话历史和本地持久化。
 
@@ -24,10 +24,11 @@
 - 流式输出会自动跟随到底部；向上翻看历史时暂停跟随，回到底部后恢复
 - 聊天图片右上角提供拖拽手柄，可拖到输入框左侧的图片按钮复用，再次作为附件发送
 - 对话历史侧栏支持搜索标题/正文、重命名、置顶、导出 Markdown、切换/删除、本地 JSON 持久化
+- 联网搜索：输入框底部的地球按钮可随时开关，回答前用 Bing 搜索网页，并在回答下方列出可点击来源；开启后顶部会提示搜索词会发送到 Bing
 - 设置项按「连接 / 对话 / 计算与图片 / 数据与关于」分组折叠
 - 停止生成、错误提示、Ollama 离线/无模型引导
 - 将图片与非视觉模型发送时给出明确警告并阻止发送
-- 顶部默认显示当前计算模式；连接远程 Ollama 时会额外标注数据会发送到该服务器
+- 顶部默认显示当前计算模式；连接远程 Ollama 或开启联网搜索时，会额外提示数据会发送到该服务器 / Bing
 
 ## 环境要求
 
@@ -41,15 +42,15 @@
 本项目不使用 `.venv`。当前环境已经安装了 Flet 和 httpx，可以直接运行：
 
 ```bash
-cd "Ollama UI"
+cd "Andesite"
 python3 main.py
 ```
 
 如果需要在一个新的 Python 环境中安装依赖，推荐用 mamba 管理环境、用 uv 安装 Python 包：
 
 ```bash
-mamba create -n ollama-ui python=3.12 -y
-mamba activate ollama-ui
+mamba create -n andesite python=3.12 -y
+mamba activate andesite
 uv pip install -r requirements.txt
 python3 main.py
 ```
@@ -88,20 +89,23 @@ ollama pull llava
 10. 生成时聊天区会自动跟随到底部。向上滚动查看历史会暂停跟随，回到底部后自动恢复。
 11. 左侧搜索框可以按标题/正文筛选对话；对话右侧的「⋯」菜单支持重命名、置顶/取消置顶、导出 Markdown 和删除。
 12. 左侧「新建对话」开启新会话；历史会话会自动保存在本地。
+13. 需要联网资料时，点击输入框下方的地球按钮开启「联网搜索」（也可以在「设置」→「对话」中打开）。开启后每次提问都会先用最后一条用户消息搜索 Bing，再把最多 5 条结果作为临时上下文发给模型；回答下方会显示可点击的「联网搜索来源」，导出 Markdown 时也会一并保留。
 
 ## 数据与隐私
 
 - 会话、图片和设置都保存在本机：
-  - `~/.ollama-ui/conversations.json`
-  - `~/.ollama-ui/settings.json`
-  - `~/.ollama-ui/media/`（聊天图片）
-- 可以用环境变量指定其他目录：
+  - `~/.andesite/conversations.json`
+  - `~/.andesite/settings.json`
+  - `~/.andesite/media/`（聊天图片）
+- 从旧版 Ollama UI 升级时，如果 `~/.andesite` 还不存在，会继续使用原来的 `~/.ollama-ui` 目录，避免历史会话丢失。
+- 可以用环境变量指定其他目录（旧的 `OLLAMA_UI_HOME` 也仍然兼容）：
 
 ```bash
-OLLAMA_UI_HOME=/path/to/data python3 main.py
+ANDESITE_HOME=/path/to/data python3 main.py
 ```
 
-- 默认连接本机 Ollama（`http://localhost:11434`），对话内容不会离开这台设备。
+- 默认连接本机 Ollama（`http://localhost:11434`）；关闭联网搜索时，对话内容不会离开这台设备。
+- 开启「联网搜索」后，当前问题的搜索词会发送给 Bing；网页结果只作为本次请求的临时系统上下文，不会写入设置里的系统提示词。搜索来源会随助手消息保存在本地会话中，方便回看和导出。搜索失败或没有结果时会自动降级为纯本地回答。此时顶部和空状态会明确提示「搜索词会发送到 Bing」。
 - 如果在设置里改用远程 Ollama 地址，消息和图片会发送到该服务器；顶部会显示「远程 Ollama · 数据会发送到该服务器」的提示。
 - 删除对话时，对话里的图片也会一并删除。
 
@@ -109,13 +113,14 @@ OLLAMA_UI_HOME=/path/to/data python3 main.py
 
 ```
 main.py                  Flet 入口
-ollama_ui/app.py         界面、交互和状态管理
-ollama_ui/client.py      Ollama HTTP API（流式 chat、模型列表、/api/ps）
-ollama_ui/images.py     添加图片时的压缩（Pillow，失败自动回退原图）
-ollama_ui/markdown_utils.py  拆分文本与代码块，用于单块复制
-ollama_ui/models.py      会话/消息/图片/设置数据模型、搜索与 Markdown 导出
-ollama_ui/storage.py     本地 JSON 与媒体文件持久化
-ollama_ui/theme.py       颜色、主题和 Markdown 样式
+andesite/app.py         界面、交互和状态管理
+andesite/client.py      Ollama HTTP API（流式 chat、模型列表、/api/ps）
+andesite/images.py      添加图片时的压缩（Pillow，失败自动回退原图）
+andesite/markdown_utils.py  拆分文本与代码块，用于单块复制
+andesite/models.py      会话/消息/图片/设置数据模型、搜索与 Markdown 导出
+andesite/storage.py     本地 JSON 与媒体文件持久化
+andesite/theme.py       颜色、主题和 Markdown 样式
+andesite/websearch.py   Bing RSS 联网搜索、结果解析与临时上下文构造
 tests/test_core.py       不依赖 UI 的核心测试
 ```
 
@@ -125,7 +130,7 @@ tests/test_core.py       不依赖 UI 的核心测试
 python3 -m unittest discover -s tests -v
 ```
 
-测试覆盖设置/会话/图片持久化、对话搜索与置顶、Markdown 导出、代码块拆分、模型能力识别、`/api/ps` 显存报告、流式响应解析（含 prompt token 统计）、上下文超限、显存不足、混合模式自定义层数、图片压缩、模型不存在和离线错误等。
+测试覆盖设置/会话/图片持久化、对话搜索与置顶、Markdown 导出、代码块拆分、模型能力识别、`/api/ps` 显存报告、流式响应解析（含 prompt token 统计）、上下文超限、显存不足、混合模式自定义层数、图片压缩、Bing RSS 结果解析与去重、联网搜索上下文构造、搜索来源持久化、模型不存在和离线错误等。
 
 ## 常见问题
 
@@ -158,4 +163,5 @@ python3 -m unittest discover -s tests -v
 - 历史记录只保留文本上下文和最近一次带图消息的图片；更早的图片需要重新附加才能让模型参考。
 - 「纯 GPU」模式会尝试把全部层放到显卡；如果显存不够，Ollama 会加载失败，应用会提示切回「自动」或「纯 CPU」。
 - 目标显存/层数由 Ollama 和显卡驱动最终决定；顶部的“实际显存”来自 `/api/ps`，是运行后的观测值，不保证与请求的 `num_gpu` 完全一致。
+- 联网搜索使用 Bing 的 RSS 搜索接口（非官方 API），依赖网络连通性和 Bing 的返回格式，可能因接口调整而失效；结果最多取 5 条，只提供标题、摘要和链接，模型不会直接抓取网页全文。不需要联网时请关闭该开关。
 - 目前是单窗口桌面应用；Web 预览模式下受 Flet 会话重连影响，部分交互可能不稳定，桌面模式是主要使用场景。
