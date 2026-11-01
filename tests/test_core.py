@@ -26,15 +26,9 @@ from andesite.models import (
     Attachment,
     Conversation,
     Message,
-    SearchSource,
     Settings,
 )
 from andesite.storage import Store
-from andesite.websearch import (
-    WebSearchError,
-    build_search_context,
-    parse_bing_rss,
-)
 
 logging.disable(logging.CRITICAL)
 
@@ -180,7 +174,6 @@ class StoreTests(unittest.TestCase):
             compute_mode="hybrid",
             hybrid_gpu_layers=12,
             compress_images=False,
-            web_search=True,
         )
         self.store.save_settings(settings)
         loaded = self.store.load_settings()
@@ -193,7 +186,6 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(loaded.compute_mode, "hybrid")
         self.assertEqual(loaded.hybrid_gpu_layers, 12)
         self.assertFalse(loaded.compress_images)
-        self.assertTrue(loaded.web_search)
 
     def test_settings_clamps_temperature(self) -> None:
         self.store.save_settings(Settings(temperature=9.0))
@@ -267,29 +259,6 @@ class StoreTests(unittest.TestCase):
         self.store.delete_images([attachment])
         self.assertFalse((self.store.media_dir / attachment.path).exists())
 
-    def test_conversation_keeps_search_sources(self) -> None:
-        conversation = Conversation(
-            messages=[
-                Message(role="user", content="查一下 Flet"),
-                Message(
-                    role="assistant",
-                    content="这是搜索结果。",
-                    sources=[
-                        SearchSource(
-                            title="Flet 官网",
-                            url="https://flet.dev/",
-                            snippet="Build apps in Python",
-                        )
-                    ],
-                ),
-            ]
-        )
-        self.store.save_conversations([conversation])
-        loaded = self.store.load_conversations()
-        self.assertEqual(len(loaded), 1)
-        self.assertEqual(len(loaded[0].messages[1].sources), 1)
-        self.assertEqual(loaded[0].messages[1].sources[0].url, "https://flet.dev/")
-
     def test_invalid_json_does_not_crash(self) -> None:
         self.store.conversations_path.write_text("{not json", encoding="utf-8")
         self.assertEqual(self.store.load_conversations(), [])
@@ -352,13 +321,6 @@ class ModelTests(unittest.TestCase):
                     model="qwen3.5:4b",
                     eval_count=20,
                     eval_duration_ns=1_000_000_000,
-                    sources=[
-                        SearchSource(
-                            title="Flet 文档",
-                            url="https://flet.dev/docs/",
-                            snippet="跨平台 UI 框架",
-                        )
-                    ],
                 ),
             ],
         )
@@ -370,20 +332,6 @@ class ModelTests(unittest.TestCase):
         self.assertIn("print(1)", markdown)
         self.assertIn("<summary>思考过程</summary>", markdown)
         self.assertIn("20 tokens", markdown)
-        self.assertIn("### 联网搜索来源", markdown)
-        self.assertIn("https://flet.dev/docs/", markdown)
-
-    def test_message_sources_roundtrip_and_legacy_default(self) -> None:
-        message = Message(
-            role="assistant",
-            content="回答",
-            sources=[SearchSource(title="来源", url="https://example.com/")],
-        )
-        loaded = Message.from_dict(message.to_dict())
-        self.assertEqual(loaded.sources[0].title, "来源")
-        self.assertEqual(loaded.sources[0].url, "https://example.com/")
-        legacy = Message.from_dict({"role": "assistant", "content": "旧回答"})
-        self.assertEqual(legacy.sources, [])
 
     def test_base_url_normalization(self) -> None:
         self.assertEqual(
@@ -395,67 +343,6 @@ class ModelTests(unittest.TestCase):
         )
         with self.assertRaises(ValueError):
             normalize_base_url("ftp://localhost:11434")
-
-
-class WebSearchTests(unittest.TestCase):
-    """Bing RSS 结果解析和模型上下文构造。"""
-
-    RSS_SAMPLE = """<?xml version="1.0" encoding="utf-8"?>
-<rss version="2.0"><channel>
-  <item>
-    <title>Python &amp; Flet - &lt;b&gt;教程&lt;/b&gt;</title>
-    <link>https://example.com/a</link>
-    <description>&lt;p&gt;用 Flet 做界面&lt;/p&gt;</description>
-  </item>
-  <item>
-    <title>重复结果</title>
-    <link>https://example.com/a</link>
-    <description>应该被去掉</description>
-  </item>
-  <item>
-    <title>危险链接</title>
-    <link>javascript:alert(1)</link>
-    <description>应该被跳过</description>
-  </item>
-  <item>
-    <title>第二条</title>
-    <link>https://example.org/b</link>
-    <description>第一行&lt;br&gt;第二行</description>
-  </item>
-</channel></rss>"""
-
-    def test_parse_bing_rss_cleans_and_dedupes(self) -> None:
-        results = parse_bing_rss(self.RSS_SAMPLE)
-        self.assertEqual(len(results), 2)
-        self.assertEqual(results[0].title, "Python & Flet - 教程")
-        self.assertEqual(results[0].snippet, "用 Flet 做界面")
-        self.assertEqual(results[1].url, "https://example.org/b")
-        self.assertNotIn("<br>", results[1].snippet)
-
-    def test_parse_bing_rss_honors_limit(self) -> None:
-        results = parse_bing_rss(self.RSS_SAMPLE, limit=1)
-        self.assertEqual(len(results), 1)
-
-    def test_parse_bing_rss_rejects_invalid_xml(self) -> None:
-        with self.assertRaises(WebSearchError):
-            parse_bing_rss("<rss><channel>")
-        with self.assertRaises(WebSearchError):
-            parse_bing_rss("")
-
-    def test_build_search_context(self) -> None:
-        results = [
-            SearchSource(
-                title="Flet 文档",
-                url="https://flet.dev/docs/",
-                snippet="跨平台 UI 框架",
-            )
-        ]
-        context = build_search_context("flet 是什么", results)
-        self.assertIn("搜索词：flet 是什么", context)
-        self.assertIn("[1] Flet 文档", context)
-        self.assertIn("https://flet.dev/docs/", context)
-        self.assertIn("忽略", context)
-        self.assertEqual(build_search_context("问题", []), "")
 
 
 class ApiMessageTests(unittest.TestCase):

@@ -88,26 +88,6 @@ class PendingImage:
 
 
 @dataclass
-class SearchSource:
-    """联网搜索返回的一条来源。"""
-
-    title: str
-    url: str
-    snippet: str = ""
-
-    def to_dict(self) -> dict[str, str]:
-        return {"title": self.title, "url": self.url, "snippet": self.snippet}
-
-    @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> SearchSource:
-        return cls(
-            title=str(raw.get("title") or "网页"),
-            url=str(raw.get("url") or ""),
-            snippet=str(raw.get("snippet") or ""),
-        )
-
-
-@dataclass
 class Message:
     """一条用户或助手消息。"""
 
@@ -116,7 +96,6 @@ class Message:
     attachments: list[Attachment] = field(default_factory=list)
     model: str | None = None
     thinking: str = ""  # 深度思考内容
-    sources: list[SearchSource] = field(default_factory=list)  # 联网搜索来源
     error: bool = False
     # Ollama 返回的生成统计，用于显示 token 数和速度。
     eval_count: int = 0
@@ -139,7 +118,6 @@ class Message:
             "attachments": [a.to_dict() for a in self.attachments],
             "model": self.model,
             "thinking": self.thinking,
-            "sources": [source.to_dict() for source in self.sources],
             "error": self.error,
             "eval_count": self.eval_count,
             "eval_duration_ns": self.eval_duration_ns,
@@ -160,12 +138,6 @@ class Message:
             for item in attachments_raw:
                 if isinstance(item, dict):
                     attachments.append(Attachment.from_dict(item))
-        sources_raw = raw.get("sources") or []
-        sources = []
-        if isinstance(sources_raw, list):
-            for item in sources_raw:
-                if isinstance(item, dict) and item.get("url"):
-                    sources.append(SearchSource.from_dict(item))
         return cls(
             id=str(raw.get("id") or new_id()),
             role=role,
@@ -173,7 +145,6 @@ class Message:
             attachments=attachments,
             model=(str(raw["model"]) if raw.get("model") else None),
             thinking=str(raw.get("thinking") or ""),
-            sources=sources,
             error=bool(raw.get("error")),
             eval_count=_as_int(raw.get("eval_count")),
             eval_duration_ns=_as_int(raw.get("eval_duration_ns")),
@@ -275,12 +246,6 @@ class Conversation:
                 lines.extend(["**生成失败**", "", message.content.strip() or "_（无内容）_", ""])
             else:
                 lines.extend([message.content.strip() or "_（无内容）_", ""])
-            # 联网搜索的来源也一起导出，方便回看引用。
-            if message.sources:
-                lines.extend(["### 联网搜索来源", ""])
-                for index, source in enumerate(message.sources, 1):
-                    lines.append(f"{index}. [{source.title}]({source.url})")
-                lines.append("")
             # 导出时附带 token 数和生成速度。
             if message.eval_count:
                 speed = ""
@@ -355,7 +320,6 @@ class Settings:
     compute_mode: str = "auto"  # auto / cpu / hybrid / gpu
     hybrid_gpu_layers: int = 0  # 0 表示自动一半
     compress_images: bool = True
-    web_search: bool = False  # 是否在回答前联网搜索
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -368,7 +332,6 @@ class Settings:
             "compute_mode": self.compute_mode,
             "hybrid_gpu_layers": self.hybrid_gpu_layers,
             "compress_images": self.compress_images,
-            "web_search": self.web_search,
         }
 
     @classmethod
@@ -391,5 +354,4 @@ class Settings:
                 0, min(999, _as_int(raw.get("hybrid_gpu_layers"), 0))
             ),
             compress_images=bool(raw.get("compress_images", True)),
-            web_search=bool(raw.get("web_search", False)),
         )
